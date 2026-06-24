@@ -1,126 +1,90 @@
 # CRM Lead Router Case Study
 
-This repository documents a practical CRM lead routing automation built with n8n and Supabase.
+This is a practical n8n + Supabase demo for cleaning up messy inbound leads before they reach a CRM.
 
-The point of the demo is not to show a flashy AI step. It is to show the parts of lead automation that usually decide whether a workflow is useful in a real workplace: duplicate webhook handling, contact deduplication, repeat enquiry history, structured classification and audit logging.
+It shows how to receive a webhook, store the raw event, avoid duplicate webhook processing, reuse existing contacts, keep request history, classify the enquiry, and write an audit trail.
 
-This is a case study, not a SaaS product.
+The main thing this repo demonstrates is simple:
 
-## Workplace Case Study
+Same event, skip it. Same person, new request, keep it.
 
-In a real service business, inbound enquiries do not arrive as neat CRM records.
+## Why This Exists
 
-They come from forms, calls, emails, referrals and manual notes. Some payloads are incomplete. Some field names change. Some contacts enquire more than once. Some webhook providers retry deliveries. If the workflow treats all repeated data as a duplicate, real enquiries get lost. If it treats every submission as new, the CRM fills up with duplicate contacts.
+Lead automation usually does not fail because the tools cannot connect. It fails in the handoff between messy real-world input and the CRM.
 
-The practical workplace problem was the gap between lead capture and CRM hygiene:
+The common problems are:
 
-- webhook retries could create duplicate records
-- repeat enquiries from the same person needed to be kept as new requests
-- form payloads were inconsistent enough to need normalization
-- staff needed a clear trail of what happened to each lead
-- manual re-keying created extra admin and follow-up risk
-- CRM/contact records needed to stay clear enough for sales activity
+- webhooks retry and create duplicate records
+- the same contact submits more than once
+- repeated data gets mistaken for a duplicate enquiry
+- CRMs fill with duplicate contacts
+- form payloads arrive in different shapes
+- nobody can see what happened when something breaks
 
-A production-grade version of this pattern was deployed in a real company. That production build was separate from this public demo, but the operating goal was the same: reduce repetitive admin handling, keep CRM records healthier, reduce routine deduplication work, and help the team spend more time on revenue-driving follow-up.
+This demo was shaped by a real workplace problem: inbound leads arriving from different sources, repeat enquiries being hard to track, and CRM hygiene depending too much on manual admin.
 
-No specific time savings or revenue claims are made here. The repo is meant to show the pattern and the engineering decisions clearly.
+The goal here is not to build a full CRM. It is to show the small but important workflow decisions that keep lead routing clean.
 
-## The Core Distinction
+## The Main Idea
 
-This demo separates two ideas that are often mixed together.
+This demo separates three jobs:
 
-Repeated webhook event:
-Same `event_id`. This is the same delivery or retry, so the system skips it and logs `duplicate_event`.
+- `event_id` protects the workflow from processing the same webhook delivery twice.
+- `email` protects the CRM from duplicate contacts.
+- `lead_requests` protects the business from losing repeat enquiries.
 
-Repeat customer with a new enquiry:
-Same `email`, different `event_id`. This is not a duplicate event. The system reuses the existing contact and creates a new `lead_request`.
+That means:
 
-That distinction is the main case study.
+- Same `event_id` = duplicate webhook retry, so skip it.
+- Same `email` with a different `event_id` = same contact, new enquiry, so reuse the contact and create a new request.
 
-## Tool Theory
+This distinction is the centre of the project.
 
-A lead routing tool like this should sit between messy inbound lead sources and the CRM.
-
-At scale, the workflow should:
-
-1. Receive inbound lead events from forms, ads, landing pages or manual intake.
-2. Preserve the raw payload for traceability.
-3. Normalize names, email, phone, company, message, source and request context.
-4. Use an event-level idempotency key so webhook retries do not create duplicate work.
-5. Use contact-level deduplication so the CRM does not fill with repeated people.
-6. Store each new enquiry as a separate request or opportunity.
-7. Classify the request into structured fields that downstream systems can trust.
-8. Log important decisions so failures can be investigated.
-9. Send approved, structured data into CRM, Slack, email or reporting systems.
-
-The important engineering point is that idempotency and deduplication solve different problems. `event_id` protects the workflow from repeated deliveries. `email` protects the CRM from duplicate contacts. Request history protects the business from losing repeat enquiries.
-
-## Demo Implementation
-
-This repo is a local portfolio/demo implementation of that pattern.
-
-It currently uses:
-
-- n8n local workflow
-- Supabase Postgres
-- PowerShell tests that post to an n8n webhook
-- deterministic mock classification inside n8n
-- audit logging in Supabase
-
-It does not currently include:
-
-- live HubSpot integration
-- live OpenAI integration
-- Slack approval
-- production webhook signature verification
-- queue-based retries
-- monitoring or alerting
-- production credential exports
-
-That boundary is deliberate. The demo proves the core CRM behavior before adding external systems.
-
-## Architecture
+## What the Demo Does
 
 ```text
 Webhook
   -> Normalize payload
-  -> Insert raw event
-  -> Check duplicate event_id
-  -> Upsert contact by email
-  -> Create lead request
+  -> Store raw event
+  -> Check event_id
+  -> Upsert contact
+  -> Create request
   -> Classify request
-  -> Update request/event
+  -> Update records
   -> Write audit log
   -> Respond
 ```
 
+The workflow runs locally in n8n and writes to Supabase Postgres.
+
 ## Data Model
 
-- `lead_events` stores raw webhook events and handles event-level idempotency.
-- `contacts` stores deduplicated people or business contacts by email.
-- `lead_requests` stores individual enquiries linked to contacts.
-- `lead_event_logs` stores the audit trail.
+- `lead_events` = raw webhook events and event-level idempotency
+- `contacts` = deduplicated people or business contacts
+- `lead_requests` = individual enquiries linked to contacts
+- `lead_event_logs` = audit trail
 
 The schema is in `sql/schema.sql`.
 
 ## Test Scenarios
 
-1. New contact and new request
-   - `event_id`: `test-003`
-   - `email`: `sarah@example.com`
-   - Expected: contact created, lead request created, request classified.
+1. New contact, new request
+   - `event_id = test-003`
+   - `email = sarah@example.com`
+   - Expected: contact created, request created, request classified.
 
 2. Duplicate webhook retry
-   - `event_id`: `test-003` again
-   - `email`: `sarah@example.com`
-   - Expected: no new contact, no new request, `duplicate_event` logged.
+   - same `event_id = test-003`
+   - Expected: no new contact, no new request, duplicate event logged.
 
 3. Existing contact, new request
-   - `event_id`: `test-004`
-   - `email`: `sarah@example.com`
-   - Expected: same contact reused, second `lead_request` created, request classified.
+   - `event_id = test-004`
+   - same `email = sarah@example.com`
+   - Expected: same contact reused, second request created, request classified.
 
-## PowerShell Test
+## PowerShell Tests
+
+Send a new lead:
 
 ```powershell
 Invoke-RestMethod `
@@ -151,9 +115,9 @@ Expected response:
 }
 ```
 
-Run the same command again with `event_id` `test-003`.
+Run the same request again with `event_id` set to `test-003`.
 
-Expected duplicate response:
+Expected response:
 
 ```json
 {
@@ -164,7 +128,7 @@ Expected duplicate response:
 }
 ```
 
-Now send a new request from the same contact:
+Now send a new enquiry from the same contact:
 
 ```powershell
 Invoke-RestMethod `
@@ -188,11 +152,11 @@ Expected database result:
 
 - `contacts` still has one Sarah row.
 - `lead_requests` has two rows linked to Sarah.
-- `lead_event_logs` includes `request_classified` and `duplicate_event` entries.
+- `lead_event_logs` includes `request_classified` and `duplicate_event`.
 
 ## Why the Classifier Is Mocked
 
-The demo uses a deterministic mock classifier inside n8n so it can be tested without requiring an OpenAI API key.
+The classifier is deterministic so the demo can run without an OpenAI key.
 
 In production, this node would be replaced with OpenAI structured outputs using the same JSON schema:
 
@@ -207,23 +171,45 @@ In production, this node would be replaced with OpenAI structured outputs using 
 }
 ```
 
-The downstream workflow should receive predictable JSON, not free text that has to be guessed at later.
+The important part is that the workflow gets predictable JSON back, not free text that later nodes have to guess at.
 
-## Production Upgrade Path
+## Running the Demo
 
-A production version would keep the same event/contact/request model and add:
+1. Run `sql/schema.sql` in Supabase.
+2. Import the n8n workflow JSON from `workflows/`.
+3. Add your own Supabase Postgres credentials to the Postgres nodes.
+4. Click `Execute workflow` in n8n.
+5. Send the PowerShell test requests.
+6. Check `contacts`, `lead_requests`, `lead_events` and `lead_event_logs`.
+
+Do not commit real credentials. Keep Supabase, OpenAI, HubSpot and Slack secrets in local environment variables or n8n credentials.
+
+## What Is Not Included
+
+This repo does not include:
+
+- live HubSpot integration
+- live OpenAI integration
+- Slack approval
+- production webhook signature verification
+- monitoring or alerting
+
+That is deliberate. The repo focuses on the core CRM logic first: receive the lead, avoid duplicate processing, reuse contacts, keep request history, classify the request and log what happened.
+
+## Production Version
+
+A production version would add:
 
 - production n8n webhook URL instead of `webhook-test`
 - signed webhook verification where supported
-- HubSpot Contact creation or update
-- HubSpot Deal or Ticket creation from `lead_requests`
-- Slack human approval before external email is sent
-- OpenAI structured outputs instead of the mock classifier
-- retry and error handling around external APIs
+- HubSpot Contacts and Deals/Tickets
+- OpenAI structured outputs
+- Slack approval before outbound emails
+- retries and error handling around external APIs
 - monitoring for failed executions
-- secure credential storage in n8n credentials or environment variables
+- secure credential storage
 
-The demo stops before those integrations so the core CRM behavior is easy to inspect.
+The data model would stay broadly the same: raw events, deduplicated contacts, linked requests and audit logs.
 
 ## Repo Contents
 
@@ -232,14 +218,7 @@ README.md
 .env.example
 .gitignore
 docs/
-  known-failure-points.md
-  production-notes.md
 sql/
-  schema.sql
 workflows/
-  dirac-crm-lead-router-v3-case-study.json
-  README.md
 ```
-
-Do not commit Supabase credentials, OpenAI keys, HubSpot tokens, Slack tokens, SSL certificates or n8n credential exports.
 
