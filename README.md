@@ -57,6 +57,10 @@ Webhook
 
 The workflow runs locally in n8n and writes to Supabase Postgres.
 
+## Workflow Canvas
+
+![n8n workflow canvas](screenshots/01-n8n-workflow-clean.png)
+
 ## Data Model
 
 - `lead_events` = raw webhook events and event-level idempotency
@@ -218,7 +222,7 @@ README.md
 .env.example
 .gitignore
 docs/
+screenshots/
 sql/
 workflows/
 ```
-
