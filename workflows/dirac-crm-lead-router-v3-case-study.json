@@ -1,0 +1,314 @@
+{
+  "name": "Dirac Systems - CRM Lead Router Case Study",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lead-router-intake",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "0aca49ad-80f4-447f-a127-77dcedbfe5a8",
+      "name": "Webhook - Lead Intake",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        528,
+        176
+      ],
+      "webhookId": "dirac-lead-router-intake"
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nconst body = input.body ?? input;\n\nfunction pickFromObjects(keys) {\n  const objects = [body, body.data, body.response, body.payload].filter(Boolean);\n  for (const obj of objects) {\n    for (const key of keys) {\n      if (obj[key] !== undefined && obj[key] !== null && obj[key] !== '') {\n        return String(obj[key]).trim();\n      }\n    }\n  }\n  return '';\n}\n\nconst possibleFields = body.fields || body.data?.fields || body.response?.fields || body.payload?.fields || [];\n\nfunction fieldByLabel(labelText) {\n  if (!Array.isArray(possibleFields)) return '';\n  const target = labelText.toLowerCase();\n\n  const field = possibleFields.find((f) => {\n    const label = String(f.label || f.question || f.title || f.name || f.key || '').toLowerCase();\n    return label.includes(target);\n  });\n\n  if (!field) return '';\n\n  const value = field.value ?? field.answer ?? field.text ?? field.response ?? '';\n\n  if (Array.isArray(value)) return value.join(', ');\n  if (typeof value === 'object' && value !== null) return JSON.stringify(value);\n  return String(value).trim();\n}\n\nconst firstName = pickFromObjects(['first_name', 'firstName', 'firstname']) || fieldByLabel('first name');\nconst lastName = pickFromObjects(['last_name', 'lastName', 'lastname']) || fieldByLabel('last name');\nconst email = pickFromObjects(['email', 'Email']) || fieldByLabel('email');\nconst phone = pickFromObjects(['phone', 'phone_number', 'phoneNumber', 'mobile']) || fieldByLabel('phone');\nconst companyName = pickFromObjects(['company_name', 'companyName', 'company', 'business_name', 'businessName']) || fieldByLabel('company');\nconst helpNeeded = pickFromObjects(['help_needed', 'message', 'description', 'need_help_with']) || fieldByLabel('what do you need help with');\nconst urgency = pickFromObjects(['urgency']) || fieldByLabel('urgent');\nconst referralSource = pickFromObjects(['referral_source', 'heard_about_us', 'source_detail']) || fieldByLabel('how did you hear');\n\nconst sourceResponseId = pickFromObjects([\n  'event_id',\n  'eventId',\n  'response_id',\n  'responseId',\n  'submission_id',\n  'submissionId',\n  'id'\n]);\n\nconst createdAt = pickFromObjects(['created_at', 'createdAt', 'submitted_at', 'submittedAt']);\n\nlet eventId = pickFromObjects(['event_id']);\n\nif (!eventId && sourceResponseId) {\n  eventId = `tally:${sourceResponseId}`;\n}\n\nif (!eventId && email && createdAt) {\n  eventId = `fallback:${email}:${createdAt}`;\n}\n\nif (!eventId) {\n  eventId = `manual:${Date.now()}`;\n}\n\nconst normalized = {\n  event_id: eventId,\n  first_name: firstName,\n  last_name: lastName,\n  email,\n  phone,\n  company_name: companyName,\n  source: body.source || 'tally',\n  help_needed: helpNeeded,\n  urgency,\n  referral_source: referralSource,\n  raw_payload: body,\n  raw_payload_json: JSON.stringify(body)\n};\n\nreturn [{ json: normalized }];"
+      },
+      "id": "3c7e01c7-0049-4153-98a3-9ab11bd778c7",
+      "name": "Normalize Lead Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        768,
+        176
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with input_data as (\n  select\n    nullif($q${{ $json.event_id }}$q$, '')::text as event_id,\n    nullif($q${{ $json.first_name }}$q$, '')::text as first_name,\n    nullif($q${{ $json.last_name }}$q$, '')::text as last_name,\n    nullif($q${{ $json.email }}$q$, '')::text as email,\n    nullif($q${{ $json.phone }}$q$, '')::text as phone,\n    nullif($q${{ $json.company_name }}$q$, '')::text as company_name,\n    nullif($q${{ $json.source }}$q$, '')::text as source,\n    nullif($q${{ $json.help_needed }}$q$, '')::text as help_needed,\n    nullif($q${{ $json.urgency }}$q$, '')::text as urgency,\n    nullif($q${{ $json.referral_source }}$q$, '')::text as referral_source,\n    $q${{ $json.raw_payload_json }}$q$::jsonb as raw_payload\n), inserted as (\n  insert into lead_events (\n    event_id,\n    first_name,\n    last_name,\n    email,\n    phone,\n    company_name,\n    source,\n    status,\n    raw_payload\n  )\n  select\n    event_id,\n    first_name,\n    last_name,\n    email,\n    phone,\n    company_name,\n    source,\n    'received',\n    raw_payload\n  from input_data\n  on conflict (event_id) do nothing\n  returning id, event_id\n)\nselect\n  input_data.event_id,\n  input_data.first_name,\n  input_data.last_name,\n  input_data.email,\n  input_data.phone,\n  input_data.company_name,\n  input_data.source,\n  input_data.help_needed,\n  input_data.urgency,\n  input_data.referral_source,\n  exists(select 1 from inserted) as inserted,\n  case\n    when exists(select 1 from inserted) then 'received'\n    else 'duplicate_event'\n  end as workflow_status\nfrom input_data;",
+        "options": {}
+      },
+      "id": "f02130ba-3291-4377-8cd9-466e0296cf77",
+      "name": "Supabase - Insert Raw Event",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1008,
+        176
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "0a588668-839d-4e8d-a080-720f88e92a5d",
+              "leftValue": "={{ $json.inserted }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b6e9ece8-9862-4ef3-98ee-c987e2dd131f",
+      "name": "IF - New Event?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1248,
+        176
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with lead_input as (\n  select\n    $q${{ $json.event_id }}$q$::text as event_id,\n    nullif($q${{ $json.email }}$q$, '')::text as email,\n    nullif($q${{ $json.first_name }}$q$, '')::text as first_name,\n    nullif($q${{ $json.last_name }}$q$, '')::text as last_name,\n    nullif($q${{ $json.phone }}$q$, '')::text as phone,\n    nullif($q${{ $json.company_name }}$q$, '')::text as company_name,\n    nullif($q${{ $json.help_needed }}$q$, '')::text as message,\n    nullif($q${{ $json.urgency }}$q$, '')::text as urgency,\n    nullif($q${{ $json.source }}$q$, '')::text as source\n), existing_contact as (\n  select c.id\n  from contacts c, lead_input li\n  where lower(c.email) = lower(li.email)\n  limit 1\n), upserted_contact as (\n  insert into contacts (\n    email,\n    first_name,\n    last_name,\n    phone,\n    company_name\n  )\n  select\n    lower(email),\n    first_name,\n    last_name,\n    phone,\n    company_name\n  from lead_input\n  on conflict (email) do update\n  set\n    first_name = coalesce(excluded.first_name, contacts.first_name),\n    last_name = coalesce(excluded.last_name, contacts.last_name),\n    phone = coalesce(excluded.phone, contacts.phone),\n    company_name = coalesce(excluded.company_name, contacts.company_name),\n    updated_at = now()\n  returning\n    id,\n    email,\n    first_name,\n    last_name,\n    phone,\n    company_name\n), created_request as (\n  insert into lead_requests (\n    event_id,\n    contact_id,\n    message,\n    urgency,\n    source,\n    status\n  )\n  select\n    li.event_id,\n    uc.id,\n    li.message,\n    li.urgency,\n    li.source,\n    'pending'\n  from lead_input li\n  cross join upserted_contact uc\n  on conflict (event_id) do nothing\n  returning\n    id,\n    event_id,\n    contact_id,\n    message,\n    urgency,\n    source,\n    status\n)\nselect\n  li.event_id,\n  uc.id as contact_id,\n  cr.id as request_id,\n  uc.email,\n  uc.first_name,\n  uc.last_name,\n  uc.phone,\n  uc.company_name,\n  cr.message,\n  cr.urgency,\n  cr.source,\n  cr.status as request_status,\n  case\n    when exists(select 1 from existing_contact) then 'existing_contact_new_request'\n    else 'new_contact_new_request'\n  end as crm_outcome\nfrom lead_input li\ncross join upserted_contact uc\ncross join created_request cr;",
+        "options": {}
+      },
+      "id": "42e6b1cd-c849-4349-b4d0-4e2a0cff7a42",
+      "name": "Supabase - Upsert Contact + Create Request",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1504,
+        16
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const lead = $input.first().json;\n\nconst text = `${lead.message || ''} ${lead.company_name || ''}`.toLowerCase();\n\nlet intent = 'other';\nif (text.includes('automat') || text.includes('workflow') || text.includes('follow-up') || text.includes('crm') || text.includes('missed call')) {\n  intent = 'automation';\n} else if (text.includes('website') || text.includes('webflow') || text.includes('landing page')) {\n  intent = 'website';\n} else if (text.includes('seo') || text.includes('google ranking') || text.includes('search')) {\n  intent = 'seo';\n}\n\nconst urgencyRaw = String(lead.urgency || '').toLowerCase();\nconst urgency = ['low', 'medium', 'high'].includes(urgencyRaw) ? urgencyRaw : 'medium';\n\nlet qualificationScore = 2;\nif (intent === 'automation') qualificationScore += 1;\nif (urgency === 'high') qualificationScore += 1;\nif (lead.email) qualificationScore += 1;\nif (qualificationScore > 5) qualificationScore = 5;\n\nlet recommendedAction = 'nurture';\nif (qualificationScore >= 4) recommendedAction = 'call';\nelse if (qualificationScore === 3) recommendedAction = 'email';\nelse if (qualificationScore < 2) recommendedAction = 'disqualify';\n\nconst classification = {\n  intent,\n  urgency,\n  company_size_estimate: 'unknown',\n  qualification_score: qualificationScore,\n  summary: `${lead.first_name || 'This lead'} from ${lead.company_name || 'an unknown company'} asked for help with: ${lead.message || 'No message provided'}. CRM outcome: ${lead.crm_outcome}.`,\n  recommended_action: recommendedAction\n};\n\nreturn [{\n  json: {\n    ...lead,\n    classification,\n    classification_json: JSON.stringify(classification)\n  }\n}];"
+      },
+      "id": "322b60a1-bd96-4be0-8707-0b667b18c930",
+      "name": "Demo AI Classification",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1776,
+        16
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with updated_request as (\n  update lead_requests\n  set\n    classification = $q${{ $json.classification_json }}$q$::jsonb,\n    status = 'classified',\n    updated_at = now()\n  where id = $q${{ $json.request_id }}$q$::uuid\n  returning\n    id as request_id,\n    event_id,\n    contact_id,\n    message,\n    urgency,\n    source,\n    status as request_status,\n    classification\n), updated_event as (\n  update lead_events\n  set\n    classification = $q${{ $json.classification_json }}$q$::jsonb,\n    status = 'processed',\n    updated_at = now()\n  where event_id = $q${{ $json.event_id }}$q$\n  returning\n    event_id,\n    status as event_status\n)\nselect\n  ur.request_id,\n  ur.event_id,\n  ur.contact_id,\n  $q${{ $json.email }}$q$::text as email,\n  $q${{ $json.first_name }}$q$::text as first_name,\n  $q${{ $json.last_name }}$q$::text as last_name,\n  $q${{ $json.phone }}$q$::text as phone,\n  $q${{ $json.company_name }}$q$::text as company_name,\n  ur.message,\n  ur.urgency,\n  ur.source,\n  ur.request_status,\n  ue.event_status,\n  $q${{ $json.crm_outcome }}$q$::text as crm_outcome,\n  ur.classification\nfrom updated_request ur\ncross join updated_event ue;",
+        "options": {}
+      },
+      "id": "0d0c0ec3-9f3b-4c2f-a8d0-135c2f93eb4c",
+      "name": "Supabase - Update Request + Event",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2032,
+        16
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "insert into lead_event_logs (\n  event_id,\n  step,\n  status,\n  message,\n  metadata\n)\nvalues (\n  $q${{ $json.event_id }}$q$,\n  'request_classified',\n  'success',\n  $q$Lead request classified and linked to CRM contact$q$,\n  $q${{ JSON.stringify($json) }}$q$::jsonb\n)\nreturning\n  event_id,\n  step,\n  status,\n  message,\n  created_at;",
+        "options": {}
+      },
+      "id": "9e6b259e-8f57-4561-9b9d-8a32fad848f7",
+      "name": "Supabase - Log Processed Request",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2288,
+        16
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"ok\": true,\n  \"event_id\": \"{{ $json.event_id }}\",\n  \"status\": \"processed\",\n  \"message\": \"Lead event processed, contact deduped, request created, and classification logged\"\n}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "75ba17ce-4141-4d29-a34d-c28fc175d79f",
+      "name": "Respond - Processed",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        2544,
+        16
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "insert into lead_event_logs (\n  event_id,\n  step,\n  status,\n  message,\n  metadata\n)\nvalues (\n  $q${{ $json.event_id }}$q$,\n  'duplicate_event',\n  'skipped',\n  'Duplicate webhook event_id skipped',\n  $q${{ JSON.stringify($json) }}$q$::jsonb\n)\nreturning\n  event_id,\n  step,\n  status,\n  message,\n  created_at;",
+        "options": {}
+      },
+      "id": "12b118fc-98a6-482f-bca3-3f54f58f043d",
+      "name": "Supabase - Log Duplicate Event",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1504,
+        336
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"ok\": true,\n  \"event_id\": \"{{ $json.event_id }}\",\n  \"status\": \"duplicate_event\",\n  \"message\": \"Duplicate webhook event_id skipped\"\n}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "1561dc0e-c0c1-444b-a627-40b42b5c0f4a",
+      "name": "Respond - Duplicate Event",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        1776,
+        336
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook - Lead Intake": {
+      "main": [
+        [
+          {
+            "node": "Normalize Lead Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Lead Payload": {
+      "main": [
+        [
+          {
+            "node": "Supabase - Insert Raw Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase - Insert Raw Event": {
+      "main": [
+        [
+          {
+            "node": "IF - New Event?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF - New Event?": {
+      "main": [
+        [
+          {
+            "node": "Supabase - Upsert Contact + Create Request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Supabase - Log Duplicate Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase - Upsert Contact + Create Request": {
+      "main": [
+        [
+          {
+            "node": "Demo AI Classification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Demo AI Classification": {
+      "main": [
+        [
+          {
+            "node": "Supabase - Update Request + Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase - Update Request + Event": {
+      "main": [
+        [
+          {
+            "node": "Supabase - Log Processed Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase - Log Processed Request": {
+      "main": [
+        [
+          {
+            "node": "Respond - Processed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase - Log Duplicate Event": {
+      "main": [
+        [
+          {
+            "node": "Respond - Duplicate Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "6933cc11-c4ca-408f-a540-095bce6e636f",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "4a8458a2348796b111075e9dfe6cec28368ecd503898b0be5bcd3f55574931d5"
+  },
+  "nodeGroups": [],
+  "id": "WGzg4Gp7IpDHrxWq",
+  "tags": []
+}
